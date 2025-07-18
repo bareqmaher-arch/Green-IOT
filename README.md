@@ -48,7 +48,7 @@ This project implements a complete Green IoT ecosystem for smart cities, focusin
 1. **Clone the repository**
 ```bash
 git clone https://github.com/bareqmaher-arch/Green-IOT
-cd greeniot-smartcity
+cd green-iot
 ```
 
 
