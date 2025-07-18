@@ -1,0 +1,293 @@
+/*
+ * Smart Street Lighting System with Solar Power
+ * For ESP32/ESP8266
+ * Green IoT Implementation
+ * 
+ * Features:
+ * - Motion detection using PIR sensor
+ * - Ambient light sensing using LDR
+ * - Adaptive LED brightness control
+ * - Solar panel voltage monitoring
+ * - LoRaWAN communication
+ * - Energy harvesting
+ */
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_INA219.h>
+#include <LoRa.h>
+#include <ArduinoJson.h>
+
+// Pin Definitions
+#define LED_PIN 2
+#define PIR_PIN 13
+#define LDR_PIN 34
+#define LORA_SS 5
+#define LORA_RST 14
+#define LORA_DIO0 26
+
+// PWM Configuration
+#define PWM_FREQ 5000
+#define PWM_CHANNEL 0
+#define PWM_RESOLUTION 8
+
+// Thresholds
+#define DARK_THRESHOLD 1000
+#define DAWN_DUSK_THRESHOLD 2000
+#define MOTION_TIMEOUT 30000  // 30 seconds
+
+// Light intensity levels
+#define LIGHT_OFF 0
+#define LIGHT_DIM 64        // 25% brightness
+#define LIGHT_MEDIUM 128    // 50% brightness
+#define LIGHT_BRIGHT 255    // 100% brightness
+
+// LoRaWAN Configuration
+#define LORA_FREQ 868E6     // 868 MHz for EU
+#define SPREADING_FACTOR 7
+#define BANDWIDTH 125E3
+#define CODING_RATE 5
+
+// Power Management
+Adafruit_INA219 ina219;
+float batteryVoltage = 0;
+float solarCurrent = 0;
+float powerConsumption = 0;
+
+// State Variables
+bool motionDetected = false;
+unsigned long lastMotionTime = 0;
+int currentBrightness = 0;
+int targetBrightness = 0;
+unsigned long lastTransmission = 0;
+const unsigned long TRANSMISSION_INTERVAL = 300000; // 5 minutes
+
+// Energy Saving Mode
+bool energySavingMode = false;
+const float LOW_BATTERY_THRESHOLD = 3.3;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Smart Street Light System Starting...");
+  
+  // Initialize pins
+  pinMode(PIR_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT);
+  
+  // Configure PWM for LED
+  ledcSetup(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(LED_PIN, PWM_CHANNEL);
+  
+  // Initialize I2C for power monitoring
+  Wire.begin();
+  if (!ina219.begin()) {
+    Serial.println("Failed to find INA219 chip");
+  } else {
+    ina219.setCalibration_16V_400mA();
+  }
+  
+  // Initialize LoRa
+  LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+  if (!LoRa.begin(LORA_FREQ)) {
+    Serial.println("LoRa init failed!");
+  } else {
+    LoRa.setSpreadingFactor(SPREADING_FACTOR);
+    LoRa.setSignalBandwidth(BANDWIDTH);
+    LoRa.setCodingRate4(CODING_RATE);
+    LoRa.setTxPower(14); // Low power for energy efficiency
+    Serial.println("LoRa initialized successfully");
+  }
+  
+  // Attach interrupt for PIR sensor
+  attachInterrupt(digitalPinToInterrupt(PIR_PIN), motionISR, RISING);
+}
+
+void IRAM_ATTR motionISR() {
+  motionDetected = true;
+  lastMotionTime = millis();
+}
+
+int readLDR() {
+  // Average multiple readings for stability
+  int sum = 0;
+  for (int i = 0; i < 10; i++) {
+    sum += analogRead(LDR_PIN);
+    delay(10);
+  }
+  return sum / 10;
+}
+
+void readPowerMetrics() {
+  if (ina219.begin()) {
+    batteryVoltage = ina219.getBusVoltage_V();
+    solarCurrent = ina219.getCurrent_mA();
+    powerConsumption = ina219.getPower_mW();
+    
+    // Check battery level for energy saving mode
+    if (batteryVoltage < LOW_BATTERY_THRESHOLD) {
+      energySavingMode = true;
+    } else if (batteryVoltage > 3.7) {
+      energySavingMode = false;
+    }
+  }
+}
+
+int calculateBrightness(int ldrValue, bool motion, bool energySaving) {
+  if (ldrValue > DAWN_DUSK_THRESHOLD) {
+    // Daylight - turn off
+    return LIGHT_OFF;
+  } else if (ldrValue > DARK_THRESHOLD) {
+    // Dawn/Dusk - minimal lighting
+    if (motion && !energySaving) {
+      return LIGHT_MEDIUM;
+    }
+    return LIGHT_DIM;
+  } else {
+    // Night time
+    if (motion) {
+      return energySaving ? LIGHT_MEDIUM : LIGHT_BRIGHT;
+    } else {
+      return energySaving ? LIGHT_OFF : LIGHT_DIM;
+    }
+  }
+}
+
+void smoothTransition(int target) {
+  if (currentBrightness != target) {
+    int step = (target > currentBrightness) ? 5 : -5;
+    
+    while (currentBrightness != target) {
+      currentBrightness += step;
+      
+      // Ensure we don't overshoot
+      if ((step > 0 && currentBrightness > target) || 
+          (step < 0 && currentBrightness < target)) {
+        currentBrightness = target;
+      }
+      
+      ledcWrite(PWM_CHANNEL, currentBrightness);
+      delay(20); // Smooth transition
+    }
+  }
+}
+
+void sendLoRaData() {
+  StaticJsonDocument<256> doc;
+  
+  doc["id"] = WiFi.macAddress();
+  doc["ldr"] = analogRead(LDR_PIN);
+  doc["motion"] = motionDetected;
+  doc["brightness"] = currentBrightness;
+  doc["battery_v"] = batteryVoltage;
+  doc["solar_ma"] = solarCurrent;
+  doc["power_mw"] = powerConsumption;
+  doc["energy_save"] = energySavingMode;
+  doc["uptime"] = millis() / 1000;
+  
+  char buffer[256];
+  size_t len = serializeJson(doc, buffer);
+  
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)buffer, len);
+  LoRa.endPacket();
+  
+  Serial.print("LoRa packet sent: ");
+  Serial.println(buffer);
+}
+
+void handleScheduling() {
+  // Implement time-based scheduling if RTC is available
+  // For now, we'll use simple light-based control
+  
+  // Example: Reduce brightness after midnight (when motion is less frequent)
+  unsigned long timeSinceLastMotion = millis() - lastMotionTime;
+  if (timeSinceLastMotion > 3600000) { // 1 hour without motion
+    energySavingMode = true;
+  }
+}
+
+void performDiagnostics() {
+  // Self-diagnostic routine
+  Serial.println("\n=== System Diagnostics ===");
+  Serial.print("Battery Voltage: ");
+  Serial.print(batteryVoltage);
+  Serial.println(" V");
+  
+  Serial.print("Solar Current: ");
+  Serial.print(solarCurrent);
+  Serial.println(" mA");
+  
+  Serial.print("Power Consumption: ");
+  Serial.print(powerConsumption);
+  Serial.println(" mW");
+  
+  Serial.print("Energy Saving Mode: ");
+  Serial.println(energySavingMode ? "ON" : "OFF");
+  
+  Serial.print("Current Brightness: ");
+  Serial.print((currentBrightness * 100) / 255);
+  Serial.println("%");
+  
+  Serial.print("LDR Value: ");
+  Serial.println(analogRead(LDR_PIN));
+  
+  Serial.print("Free Heap: ");
+  Serial.print(ESP.getFreeHeap());
+  Serial.println(" bytes");
+  Serial.println("========================\n");
+}
+
+void loop() {
+  // Read sensors
+  int ldrValue = readLDR();
+  
+  // Check if motion timeout has passed
+  if (motionDetected && (millis() - lastMotionTime > MOTION_TIMEOUT)) {
+    motionDetected = false;
+  }
+  
+  // Read power metrics every 10 seconds
+  static unsigned long lastPowerRead = 0;
+  if (millis() - lastPowerRead > 10000) {
+    readPowerMetrics();
+    lastPowerRead = millis();
+  }
+  
+  // Calculate target brightness
+  targetBrightness = calculateBrightness(ldrValue, motionDetected, energySavingMode);
+  
+  // Smooth transition to target brightness
+  smoothTransition(targetBrightness);
+  
+  // Send data via LoRa at intervals
+  if (millis() - lastTransmission > TRANSMISSION_INTERVAL) {
+    sendLoRaData();
+    lastTransmission = millis();
+  }
+  
+  // Perform diagnostics every minute
+  static unsigned long lastDiagnostics = 0;
+  if (millis() - lastDiagnostics > 60000) {
+    performDiagnostics();
+    lastDiagnostics = millis();
+  }
+  
+  // Handle scheduling
+  handleScheduling();
+  
+  // Small delay to prevent excessive polling
+  delay(100);
+}
+
+// Emergency mode - if main loop fails
+void emergencyMode() {
+  // Blink LED to indicate error
+  while (true) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(500);
+    digitalWrite(LED_PIN, LOW);
+    delay(500);
+  }
+}

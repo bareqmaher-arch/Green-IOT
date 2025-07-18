@@ -1,0 +1,546 @@
+/*
+ * Air Quality Sensor Node
+ * Arduino/ESP8266/ESP32 Implementation
+ * Green IoT Project
+ * 
+ * Sensors:
+ * - PMS5003/PMS7003 for PM2.5 and PM10
+ * - MQ series gas sensors
+ * - DHT22/BME280 for temperature and humidity
+ * 
+ * Communication:
+ * - LoRaWAN for long-range, low-power transmission
+ * - WiFi for high-bandwidth applications
+ */
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <SoftwareSerial.h>
+#include <ArduinoJson.h>
+#include <LoRa.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+
+// Pin Definitions
+#define PMS_RX 4
+#define PMS_TX 5
+#define MQ2_PIN A0
+#define MQ7_PIN A1
+#define MQ135_PIN A2
+#define STATUS_LED 13
+
+// LoRa Configuration
+#define LORA_SS 10
+#define LORA_RST 9
+#define LORA_DIO0 2
+#define LORA_FREQ 868E6
+
+// Sensor Configuration
+#define SEALEVELPRESSURE_HPA (1013.25)
+#define SAMPLING_INTERVAL 5000  // 5 seconds
+#define TRANSMISSION_INTERVAL 60000  // 1 minute
+
+// PM Sensor Commands
+#define PMS_CMD_READ 0x42
+#define PMS_CMD_MODE 0x4D
+
+// Air Quality Thresholds
+const int AQI_GOOD = 50;
+const int AQI_MODERATE = 100;
+const int AQI_UNHEALTHY_SENSITIVE = 150;
+const int AQI_UNHEALTHY = 200;
+const int AQI_VERY_UNHEALTHY = 300;
+const int AQI_HAZARDOUS = 400;
+
+// Sensor Objects
+SoftwareSerial pmsSerial(PMS_RX, PMS_TX);
+Adafruit_BME280 bme;
+
+// Data Structure
+struct AirQualityData {
+  float pm25;
+  float pm10;
+  float temperature;
+  float humidity;
+  float pressure;
+  int co_ppm;
+  int no2_ppm;
+  int nh3_ppm;
+  int aqi;
+  unsigned long timestamp;
+};
+
+// Global Variables
+AirQualityData currentData;
+unsigned long lastSampleTime = 0;
+unsigned long lastTransmitTime = 0;
+bool pmsReady = false;
+int sampleCount = 0;
+float dataBuffer[10][8];  // Buffer for averaging
+
+// Calibration values for MQ sensors
+const float MQ2_R0 = 10.0;
+const float MQ7_R0 = 10.0;
+const float MQ135_R0 = 10.0;
+const float RL = 10.0;  // Load resistance
+
+void setup() {
+  Serial.begin(115200);
+  pmsSerial.begin(9600);
+  
+  Serial.println(F("Air Quality Monitoring Node"));
+  Serial.println(F("Initializing sensors..."));
+  
+  // Initialize pins
+  pinMode(STATUS_LED, OUTPUT);
+  pinMode(MQ2_PIN, INPUT);
+  pinMode(MQ7_PIN, INPUT);
+  pinMode(MQ135_PIN, INPUT);
+  
+  // Initialize BME280
+  if (!bme.begin(0x76)) {
+    Serial.println(F("BME280 sensor not found!"));
+  } else {
+    Serial.println(F("BME280 initialized"));
+    // Configure for weather monitoring
+    bme.setSampling(Adafruit_BME280::MODE_NORMAL,
+                    Adafruit_BME280::SAMPLING_X2,  // temperature
+                    Adafruit_BME280::SAMPLING_X16, // pressure
+                    Adafruit_BME280::SAMPLING_X1,  // humidity
+                    Adafruit_BME280::FILTER_X16,
+                    Adafruit_BME280::STANDBY_MS_0_5);
+  }
+  
+  // Initialize LoRa
+  LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+  if (!LoRa.begin(LORA_FREQ)) {
+    Serial.println(F("LoRa init failed!"));
+  } else {
+    LoRa.setSpreadingFactor(7);
+    LoRa.setSignalBandwidth(125E3);
+    LoRa.setCodingRate4(5);
+    LoRa.setTxPower(14);  // Adjust based on regulations
+    Serial.println(F("LoRa initialized"));
+  }
+  
+  // Initialize PM sensor
+  setupPMSensor();
+  
+  // Warm up sensors
+  Serial.println(F("Warming up sensors (30s)..."));
+  delay(30000);
+  
+  Serial.println(F("System ready!"));
+  blinkLED(3);
+}
+
+void setupPMSensor() {
+  // Set PM sensor to active mode
+  uint8_t cmd[] = {0x42, 0x4D, 0xE1, 0x00, 0x01, 0x01, 0x71};
+  pmsSerial.write(cmd, sizeof(cmd));
+  delay(100);
+  pmsSerial.flush();
+  pmsReady = true;
+}
+
+bool readPMSensor(float &pm25, float &pm10) {
+  if (!pmsReady) return false;
+  
+  uint8_t buffer[32];
+  int idx = 0;
+  
+  // Wait for start bytes
+  while (pmsSerial.available()) {
+    if (pmsSerial.read() == 0x42 && pmsSerial.available() && pmsSerial.read() == 0x4D) {
+      buffer[0] = 0x42;
+      buffer[1] = 0x4D;
+      
+      // Read remaining data
+      if (pmsSerial.available() >= 30) {
+        pmsSerial.readBytes(&buffer[2], 30);
+        
+        // Verify checksum
+        uint16_t checksum = 0;
+        for (int i = 0; i < 30; i++) {
+          checksum += buffer[i];
+        }
+        uint16_t checksumRx = (buffer[30] << 8) | buffer[31];
+        
+        if (checksum == checksumRx) {
+          // Extract PM2.5 and PM10 values (CF=1, standard particle)
+          pm25 = ((buffer[12] << 8) | buffer[13]);
+          pm10 = ((buffer[14] << 8) | buffer[15]);
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+float readMQSensor(int pin, float r0, const char* gasType) {
+  int sensorValue = analogRead(pin);
+  float voltage = sensorValue * (5.0 / 1023.0);
+  float rs = (5.0 - voltage) / voltage * RL;
+  float ratio = rs / r0;
+  
+  // Simplified gas concentration calculation
+  // In production, use proper calibration curves
+  float ppm = 0;
+  
+  if (strcmp(gasType, "CO") == 0) {
+    // MQ-7 CO calculation
+    ppm = pow(10, ((log10(ratio) - 1.525) / -0.414));
+  } else if (strcmp(gasType, "NO2") == 0) {
+    // MQ-135 NO2 approximation
+    ppm = pow(10, ((log10(ratio) - 0.786) / -0.347));
+  } else if (strcmp(gasType, "NH3") == 0) {
+    // MQ-135 NH3 approximation
+    ppm = pow(10, ((log10(ratio) - 0.425) / -0.391));
+  }
+  
+  return constrain(ppm, 0, 1000);
+}
+
+int calculateAQI(float pm25) {
+  // US EPA AQI calculation for PM2.5
+  if (pm25 <= 12.0) {
+    return map(pm25 * 10, 0, 120, 0, 50);
+  } else if (pm25 <= 35.4) {
+    return map(pm25 * 10, 121, 354, 51, 100);
+  } else if (pm25 <= 55.4) {
+    return map(pm25 * 10, 355, 554, 101, 150);
+  } else if (pm25 <= 150.4) {
+    return map(pm25 * 10, 555, 1504, 151, 200);
+  } else if (pm25 <= 250.4) {
+    return map(pm25 * 10, 1505, 2504, 201, 300);
+  } else if (pm25 <= 350.4) {
+    return map(pm25 * 10, 2505, 3504, 301, 400);
+  } else {
+    return map(pm25 * 10, 3505, 5004, 401, 500);
+  }
+}
+
+String getAQICategory(int aqi) {
+  if (aqi <= AQI_GOOD) return "Good";
+  else if (aqi <= AQI_MODERATE) return "Moderate";
+  else if (aqi <= AQI_UNHEALTHY_SENSITIVE) return "Unhealthy for Sensitive";
+  else if (aqi <= AQI_UNHEALTHY) return "Unhealthy";
+  else if (aqi <= AQI_VERY_UNHEALTHY) return "Very Unhealthy";
+  else return "Hazardous";
+}
+
+void collectSensorData() {
+  // Read PM sensor
+  float pm25 = 0, pm10 = 0;
+  if (readPMSensor(pm25, pm10)) {
+    currentData.pm25 = pm25;
+    currentData.pm10 = pm10;
+  }
+  
+  // Read environmental sensor
+  currentData.temperature = bme.readTemperature();
+  currentData.humidity = bme.readHumidity();
+  currentData.pressure = bme.readPressure() / 100.0F;
+  
+  // Read gas sensors
+  currentData.co_ppm = readMQSensor(MQ7_PIN, MQ7_R0, "CO");
+  currentData.no2_ppm = readMQSensor(MQ135_PIN, MQ135_R0, "NO2");
+  currentData.nh3_ppm = readMQSensor(MQ135_PIN, MQ135_R0, "NH3");
+  
+  // Calculate AQI
+  currentData.aqi = calculateAQI(currentData.pm25);
+  currentData.timestamp = millis();
+  
+  // Add to buffer for averaging
+  dataBuffer[sampleCount][0] = currentData.pm25;
+  dataBuffer[sampleCount][1] = currentData.pm10;
+  dataBuffer[sampleCount][2] = currentData.temperature;
+  dataBuffer[sampleCount][3] = currentData.humidity;
+  dataBuffer[sampleCount][4] = currentData.co_ppm;
+  dataBuffer[sampleCount][5] = currentData.no2_ppm;
+  dataBuffer[sampleCount][6] = currentData.nh3_ppm;
+  dataBuffer[sampleCount][7] = currentData.aqi;
+  
+  sampleCount = (sampleCount + 1) % 10;
+}
+
+AirQualityData getAveragedData() {
+  AirQualityData avgData;
+  
+  // Calculate averages
+  for (int i = 0; i < 8; i++) {
+    float sum = 0;
+    int count = 0;
+    for (int j = 0; j < 10; j++) {
+      if (dataBuffer[j][i] > 0) {
+        sum += dataBuffer[j][i];
+        count++;
+      }
+    }
+    
+    float avg = (count > 0) ? sum / count : 0;
+    
+    switch (i) {
+      case 0: avgData.pm25 = avg; break;
+      case 1: avgData.pm10 = avg; break;
+      case 2: avgData.temperature = avg; break;
+      case 3: avgData.humidity = avg; break;
+      case 4: avgData.co_ppm = avg; break;
+      case 5: avgData.no2_ppm = avg; break;
+      case 6: avgData.nh3_ppm = avg; break;
+      case 7: avgData.aqi = avg; break;
+    }
+  }
+  
+  avgData.timestamp = millis();
+  return avgData;
+}
+
+void transmitData() {
+  // Get averaged data
+  AirQualityData avgData = getAveragedData();
+  
+  // Create JSON payload
+  StaticJsonDocument<256> doc;
+  doc["id"] = "AQ_NODE_001";
+  doc["pm25"] = avgData.pm25;
+  doc["pm10"] = avgData.pm10;
+  doc["temp"] = avgData.temperature;
+  doc["hum"] = avgData.humidity;
+  doc["pres"] = avgData.pressure;
+  doc["co"] = avgData.co_ppm;
+  doc["no2"] = avgData.no2_ppm;
+  doc["aqi"] = avgData.aqi;
+  doc["ts"] = avgData.timestamp;
+  
+  // Serialize to string
+  char jsonBuffer[256];
+  size_t len = serializeJson(doc, jsonBuffer);
+  
+  // Send via LoRa
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)jsonBuffer, len);
+  LoRa.endPacket();
+  
+  Serial.print(F("Data transmitted: "));
+  Serial.println(jsonBuffer);
+  
+  blinkLED(1);
+}
+
+void displayData() {
+  Serial.println(F("\n=== Air Quality Data ==="));
+  Serial.print(F("PM2.5: ")); Serial.print(currentData.pm25); Serial.println(F(" ug/m3"));
+  Serial.print(F("PM10: ")); Serial.print(currentData.pm10); Serial.println(F(" ug/m3"));
+  Serial.print(F("Temperature: ")); Serial.print(currentData.temperature); Serial.println(F(" C"));
+  Serial.print(F("Humidity: ")); Serial.print(currentData.humidity); Serial.println(F(" %"));
+  Serial.print(F("Pressure: ")); Serial.print(currentData.pressure); Serial.println(F(" hPa"));
+  Serial.print(F("CO: ")); Serial.print(currentData.co_ppm); Serial.println(F(" ppm"));
+  Serial.print(F("NO2: ")); Serial.print(currentData.no2_ppm); Serial.println(F(" ppm"));
+  Serial.print(F("AQI: ")); Serial.print(currentData.aqi);
+  Serial.print(F(" (")); Serial.print(getAQICategory(currentData.aqi)); Serial.println(F(")"));
+  Serial.println(F("======================="));
+}
+
+void checkAlerts() {
+  // Check for dangerous levels
+  bool alert = false;
+  String alertMsg = "ALERT: ";
+  
+  if (currentData.aqi > AQI_UNHEALTHY) {
+    alert = true;
+    alertMsg += "Unhealthy air quality! ";
+  }
+  
+  if (currentData.co_ppm > 35) {  // WHO 8-hour limit
+    alert = true;
+    alertMsg += "High CO levels! ";
+  }
+  
+  if (currentData.pm25 > 75) {  // WHO 24-hour limit
+    alert = true;
+    alertMsg += "High PM2.5 levels! ";
+  }
+  
+  if (alert) {
+    Serial.println(alertMsg);
+    // Send immediate alert
+    sendAlert(alertMsg);
+    blinkLED(5);
+  }
+}
+
+void sendAlert(String message) {
+  // Create alert JSON
+  StaticJsonDocument<128> doc;
+  doc["type"] = "ALERT";
+  doc["id"] = "AQ_NODE_001";
+  doc["msg"] = message;
+  doc["aqi"] = currentData.aqi;
+  doc["ts"] = millis();
+  
+  char buffer[128];
+  serializeJson(doc, buffer);
+  
+  // Send with high priority
+  LoRa.beginPacket();
+  LoRa.write((uint8_t*)buffer, strlen(buffer));
+  LoRa.endPacket();
+}
+
+void enterSleepMode() {
+  // Implement sleep mode for power saving
+  // This is MCU-specific
+  Serial.println(F("Entering sleep mode..."));
+  
+  // For AVR:
+  // set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  // sleep_enable();
+  // sleep_mode();
+  
+  // For ESP32:
+  // esp_sleep_enable_timer_wakeup(SAMPLING_INTERVAL * 1000);
+  // esp_deep_sleep_start();
+}
+
+void blinkLED(int times) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(STATUS_LED, HIGH);
+    delay(100);
+    digitalWrite(STATUS_LED, LOW);
+    delay(100);
+  }
+}
+
+void calibrateSensors() {
+  // Auto-calibration routine
+  Serial.println(F("Starting sensor calibration..."));
+  
+  // Collect baseline readings
+  float baseline[7] = {0};
+  for (int i = 0; i < 100; i++) {
+    baseline[0] += analogRead(MQ2_PIN);
+    baseline[1] += analogRead(MQ7_PIN);
+    baseline[2] += analogRead(MQ135_PIN);
+    delay(50);
+  }
+  
+  // Calculate average baselines
+  for (int i = 0; i < 3; i++) {
+    baseline[i] /= 100;
+  }
+  
+  Serial.println(F("Calibration complete"));
+  Serial.print(F("MQ2 baseline: ")); Serial.println(baseline[0]);
+  Serial.print(F("MQ7 baseline: ")); Serial.println(baseline[1]);
+  Serial.print(F("MQ135 baseline: ")); Serial.println(baseline[2]);
+}
+
+void performSelfTest() {
+  Serial.println(F("\nPerforming self-test..."));
+  
+  bool allOk = true;
+  
+  // Test BME280
+  float temp = bme.readTemperature();
+  if (temp < -40 || temp > 85) {
+    Serial.println(F("BME280 test FAILED"));
+    allOk = false;
+  } else {
+    Serial.println(F("BME280 test OK"));
+  }
+  
+  // Test MQ sensors
+  int mq2Val = analogRead(MQ2_PIN);
+  int mq7Val = analogRead(MQ7_PIN);
+  int mq135Val = analogRead(MQ135_PIN);
+  
+  if (mq2Val == 0 || mq2Val == 1023) {
+    Serial.println(F("MQ2 test FAILED"));
+    allOk = false;
+  } else {
+    Serial.println(F("MQ2 test OK"));
+  }
+  
+  if (mq7Val == 0 || mq7Val == 1023) {
+    Serial.println(F("MQ7 test FAILED"));
+    allOk = false;
+  } else {
+    Serial.println(F("MQ7 test OK"));
+  }
+  
+  if (mq135Val == 0 || mq135Val == 1023) {
+    Serial.println(F("MQ135 test FAILED"));
+    allOk = false;
+  } else {
+    Serial.println(F("MQ135 test OK"));
+  }
+  
+  // Test PM sensor
+  float pm25, pm10;
+  if (!readPMSensor(pm25, pm10) || pm25 < 0 || pm10 < 0) {
+    Serial.println(F("PM sensor test FAILED"));
+    allOk = false;
+  } else {
+    Serial.println(F("PM sensor test OK"));
+  }
+  
+  if (allOk) {
+    Serial.println(F("All tests PASSED"));
+    blinkLED(3);
+  } else {
+    Serial.println(F("Some tests FAILED"));
+    blinkLED(10);
+  }
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+  
+  // Collect sensor data at sampling interval
+  if (currentTime - lastSampleTime >= SAMPLING_INTERVAL) {
+    collectSensorData();
+    displayData();
+    checkAlerts();
+    lastSampleTime = currentTime;
+  }
+  
+  // Transmit data at transmission interval
+  if (currentTime - lastTransmitTime >= TRANSMISSION_INTERVAL) {
+    transmitData();
+    lastTransmitTime = currentTime;
+  }
+  
+  // Check for serial commands
+  if (Serial.available()) {
+    char cmd = Serial.read();
+    switch (cmd) {
+      case 'c':
+        calibrateSensors();
+        break;
+      case 't':
+        performSelfTest();
+        break;
+      case 'd':
+        displayData();
+        break;
+      case 'r':
+        Serial.println(F("Resetting..."));
+        delay(100);
+        // Reset MCU
+        // For AVR: asm volatile ("jmp 0");
+        // For ESP: ESP.restart();
+        break;
+    }
+  }
+  
+  // Optional: Enter sleep mode between readings
+  // enterSleepMode();
+}
+
+// Interrupt Service Routine for wake up
+// void wakeUp() {
+//   // Disable sleep mode
+//   sleep_disable();
+// }

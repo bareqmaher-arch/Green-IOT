@@ -1,0 +1,526 @@
+# docker-compose.yml
+# Docker Compose configuration for Green IoT Smart City System
+
+version: '3.8'
+
+services:
+  # MQTT Broker
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: greeniot_mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    restart: unless-stopped
+
+  # InfluxDB for time-series data
+  influxdb:
+    image: influxdb:2.0
+    container_name: greeniot_influxdb
+    ports:
+      - "8086:8086"
+    volumes:
+      - ./influxdb/data:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=greeniot2024
+      - DOCKER_INFLUXDB_INIT_ORG=greeniot
+      - DOCKER_INFLUXDB_INIT_BUCKET=sensor_data
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: greeniot_grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=greeniot
+      - GF_INSTALL_PLUGINS=grafana-worldmap-panel
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+
+  # Node-RED for data flow management
+  nodered:
+    image: nodered/node-red:latest
+    container_name: greeniot_nodered
+    ports:
+      - "1880:1880"
+    volumes:
+      - ./nodered/data:/data
+    environment:
+      - TZ=Asia/Baghdad
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+
+  # ChirpStack LoRaWAN Network Server
+  chirpstack:
+    image: chirpstack/chirpstack:4
+    container_name: greeniot_chirpstack
+    command: -c /etc/chirpstack
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./chirpstack:/etc/chirpstack
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+
+  # PostgreSQL for ChirpStack
+  postgres:
+    image: postgres:14-alpine
+    container_name: greeniot_postgres
+    volumes:
+      - ./postgresql/data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=chirpstack
+      - POSTGRES_USER=chirpstack
+      - POSTGRES_PASSWORD=chirpstack
+    restart: unless-stopped
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: greeniot_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis/data:/data
+    restart: unless-stopped
+
+  # Custom services
+  air_quality_processor:
+    build:
+      context: ./services/air_quality
+      dockerfile: Dockerfile
+    container_name: greeniot_air_quality
+    volumes:
+      - ./services/air_quality:/app
+      - /dev:/dev
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+      - /dev/i2c-1:/dev/i2c-1
+    privileged: true
+    depends_on:
+      - mosquitto
+      - influxdb
+    restart: unless-stopped
+
+  streetlight_controller:
+    build:
+      context: ./services/streetlight
+      dockerfile: Dockerfile
+    container_name: greeniot_streetlight
+    volumes:
+      - ./services/streetlight:/app
+    depends_on:
+      - mosquitto
+      - influxdb
+    restart: unless-stopped
+
+  gateway_manager:
+    build:
+      context: ./services/gateway
+      dockerfile: Dockerfile
+    container_name: greeniot_gateway
+    volumes:
+      - ./services/gateway:/app
+    network_mode: host
+    depends_on:
+      - mosquitto
+      - postgres
+    restart: unless-stopped
+
+  web_dashboard:
+    image: nginx:alpine
+    container_name: greeniot_dashboard
+    ports:
+      - "80:80"
+    volumes:
+      - ./dashboard:/usr/share/nginx/html
+    restart: unless-stopped
+
+networks:
+  default:
+    name: greeniot_network
+
+---
+# mosquitto.conf
+# Mosquitto MQTT Broker Configuration
+
+listener 1883
+protocol mqtt
+
+listener 9001
+protocol websockets
+
+allow_anonymous true
+persistence true
+persistence_location /mosquitto/data/
+
+log_dest file /mosquitto/log/mosquitto.log
+log_type all
+
+# Connection settings
+max_keepalive 60
+persistent_client_expiration 3h
+
+# Security (enable in production)
+# password_file /mosquitto/config/passwd
+# acl_file /mosquitto/config/acl
+
+---
+# requirements.txt
+# Python dependencies for Green IoT project
+
+# Core dependencies
+numpy==1.24.3
+pandas==2.0.3
+scipy==1.11.1
+
+# IoT and Hardware
+RPi.GPIO==0.7.1
+spidev==3.6
+pyserial==3.5
+smbus2==0.4.2
+adafruit-circuitpython-ina219==3.4.15
+adafruit-circuitpython-bme280==2.6.20
+
+# MQTT and Networking
+paho-mqtt==1.6.1
+requests==2.31.0
+websocket-client==1.6.1
+
+# LoRaWAN
+pyloralib==1.2.0
+
+# Data Storage
+influxdb-client==1.36.1
+redis==4.6.0
+sqlite3
+
+# Machine Learning
+scikit-learn==1.3.0
+joblib==1.3.1
+
+# Web Framework (for API)
+flask==2.3.2
+flask-cors==4.0.0
+flask-restful==0.3.10
+
+# Async Support
+asyncio==3.4.3
+aiohttp==3.8.5
+
+# Data Visualization
+matplotlib==3.7.2
+seaborn==0.12.2
+plotly==5.15.0
+
+# Utilities
+python-dotenv==1.0.0
+click==8.1.6
+colorama==0.4.6
+tqdm==4.65.0
+
+# Logging and Monitoring
+loguru==0.7.0
+prometheus-client==0.17.1
+
+# Development
+pytest==7.4.0
+pytest-asyncio==0.21.1
+black==23.7.0
+flake8==6.1.0
+
+---
+# Dockerfile for Air Quality Service
+FROM python:3.9-slim-bullseye
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    python3-dev \
+    i2c-tools \
+    libgpiod2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY . .
+
+# Create non-root user
+RUN useradd -m -u 1000 iotuser && chown -R iotuser:iotuser /app
+USER iotuser
+
+# Run the application
+CMD ["python", "air_quality_edge.py"]
+
+---
+# setup.py
+# Setup script for Green IoT Smart City project
+
+from setuptools import setup, find_packages
+
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
+
+setup(
+    name="greeniot-smartcity",
+    version="1.0.0",
+    author="Karrar M. Khudhair, Bareq M. Khudhair",
+    author_email="karrarmaher@iku.edu.iq",
+    description="Green IoT implementation for sustainable smart cities",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    url="https://github.com/yourusername/greeniot-smartcity",
+    packages=find_packages(),
+    classifiers=[
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Developers",
+        "Topic :: Software Development :: Embedded Systems",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+    ],
+    python_requires=">=3.8",
+    install_requires=[
+        "numpy>=1.24.0",
+        "pandas>=2.0.0",
+        "paho-mqtt>=1.6.0",
+        "influxdb-client>=1.36.0",
+        "scikit-learn>=1.3.0",
+    ],
+    entry_points={
+        "console_scripts": [
+            "greeniot-gateway=services.gateway.main:main",
+            "greeniot-airquality=services.air_quality.main:main",
+            "greeniot-streetlight=services.streetlight.main:main",
+        ],
+    },
+)
+
+---
+# config.yaml
+# Main configuration file for Green IoT system
+
+system:
+  name: "Green IoT Smart City"
+  version: "1.0.0"
+  location:
+    city: "Baghdad"
+    country: "Iraq"
+    timezone: "Asia/Baghdad"
+    coordinates:
+      latitude: 33.3152
+      longitude: 44.3661
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  websocket_port: 9001
+  client_id_prefix: "greeniot"
+  topics:
+    air_quality: "airquality/+"
+    street_light: "streetlight/+"
+    gateway: "gateway/+"
+    alerts: "alerts/+"
+
+influxdb:
+  url: "http://localhost:8086"
+  token: "your-influxdb-token"
+  org: "greeniot"
+  bucket: "sensor_data"
+
+lorawan:
+  frequency_plan: "EU868"
+  spreading_factor: 7
+  bandwidth: 125000
+  coding_rate: 5
+  tx_power: 14
+
+sensors:
+  air_quality:
+    pm_sensor:
+      type: "PMS5003"
+      serial_port: "/dev/ttyUSB0"
+      baudrate: 9600
+    environmental:
+      type: "BME280"
+      i2c_address: 0x76
+    gas_sensors:
+      - type: "MQ7"
+        pin: 17
+        gas: "CO"
+      - type: "MQ135"
+        pin: 27
+        gas: "Air Quality"
+    
+  street_light:
+    pir_sensor:
+      pin: 13
+      timeout: 30000
+    ldr_sensor:
+      pin: 34
+      dark_threshold: 1000
+      dawn_threshold: 2000
+    led:
+      pin: 2
+      pwm_frequency: 5000
+    
+thresholds:
+  air_quality:
+    pm25:
+      good: 12
+      moderate: 35.4
+      unhealthy_sensitive: 55.4
+      unhealthy: 150.4
+      very_unhealthy: 250.4
+      hazardous: 350.4
+    co:
+      safe: 9
+      warning: 25
+      danger: 50
+  
+  battery:
+    low: 3.3
+    critical: 3.0
+    full: 4.2
+
+data_retention:
+  raw_data: "7d"
+  aggregated_data: "30d"
+  statistics: "1y"
+
+alerts:
+  enabled: true
+  email:
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    from_address: "greeniot@example.com"
+  webhook:
+    url: "https://your-webhook-url.com/alerts"
+  cooldown_period: 300  # seconds
+
+---
+# Makefile
+# Build automation for Green IoT project
+
+.PHONY: help build deploy clean test lint
+
+DOCKER_COMPOSE = docker-compose
+PYTHON = python3
+
+help:
+	@echo "Green IoT Smart City - Available commands:"
+	@echo "  make build    - Build all Docker containers"
+	@echo "  make deploy   - Deploy the system"
+	@echo "  make stop     - Stop all services"
+	@echo "  make clean    - Clean up containers and volumes"
+	@echo "  make test     - Run tests"
+	@echo "  make lint     - Run code linting"
+	@echo "  make logs     - Show logs"
+
+build:
+	$(DOCKER_COMPOSE) build
+
+deploy:
+	$(DOCKER_COMPOSE) up -d
+	@echo "Green IoT system deployed!"
+	@echo "Dashboard: http://localhost"
+	@echo "Grafana: http://localhost:3000"
+	@echo "Node-RED: http://localhost:1880"
+
+stop:
+	$(DOCKER_COMPOSE) down
+
+clean:
+	$(DOCKER_COMPOSE) down -v
+	rm -rf ./data/*
+
+test:
+	$(PYTHON) -m pytest tests/
+
+lint:
+	$(PYTHON) -m flake8 services/
+	$(PYTHON) -m black --check services/
+
+logs:
+	$(DOCKER_COMPOSE) logs -f
+
+monitor:
+	watch -n 2 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+
+backup:
+	tar -czf backup_$(shell date +%Y%m%d_%H%M%S).tar.gz data/
+
+install-dev:
+	pip install -r requirements.txt
+	pip install -r requirements-dev.txt
+
+generate-docs:
+	sphinx-build -b html docs/ docs/_build/
+
+---
+# .env.example
+# Environment variables for Green IoT system
+
+# System
+NODE_ENV=production
+DEBUG=false
+
+# MQTT
+MQTT_BROKER=localhost
+MQTT_PORT=1883
+MQTT_USERNAME=
+MQTT_PASSWORD=
+
+# InfluxDB
+INFLUXDB_URL=http://localhost:8086
+INFLUXDB_TOKEN=your-secure-token-here
+INFLUXDB_ORG=greeniot
+INFLUXDB_BUCKET=sensor_data
+
+# Security
+JWT_SECRET=your-jwt-secret-here
+API_KEY=your-api-key-here
+
+# Email Alerts
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your-email@gmail.com
+SMTP_PASS=your-app-password
+ALERT_EMAIL=admin@example.com
+
+# LoRaWAN
+LORA_APP_EUI=0000000000000000
+LORA_APP_KEY=00000000000000000000000000000000
+
+# Hardware
+GPIO_MODE=BCM
+I2C_BUS=1
+
+# Data Retention
+DATA_RETENTION_DAYS=30
+LOG_RETENTION_DAYS=7

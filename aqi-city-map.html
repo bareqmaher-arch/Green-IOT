@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Green IoT - Smart City AQI Monitoring</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #f0f0f0;
+            color: #333;
+            overflow: hidden;
+        }
+
+        .container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .city-map {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-color: #e8e4e0;
+            overflow: hidden;
+        }
+
+        /* Map Elements */
+        .map-base {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(to bottom, #f5f3f0 0%, #e8e4e0 100%);
+        }
+
+        /* Streets */
+        .street {
+            position: absolute;
+            background: #ffffff;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+
+        .major-street {
+            background: #f8f8f8;
+            border: 1px solid #ddd;
+        }
+
+        .minor-street {
+            background: #fafafa;
+            opacity: 0.8;
+        }
+
+        /* River */
+        .river {
+            position: absolute;
+            background: #a3c5e8;
+            opacity: 0.7;
+            border-radius: 50px;
+        }
+
+        /* Districts/Blocks */
+        .city-block {
+            position: absolute;
+            background: #f9f7f5;
+            border: 1px solid #e0ddd8;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        .park-area {
+            background: #d4e8d4;
+            border: 1px solid #c0d8c0;
+        }
+
+        /* AQI Overlays */
+        .aqi-overlay {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(50px);
+            opacity: 0.5;
+            animation: pulse 4s ease-in-out infinite;
+            pointer-events: none;
+            mix-blend-mode: multiply;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 0.7; }
+        }
+
+        .aqi-good { background: radial-gradient(circle, #00e676 0%, transparent 70%); }
+        .aqi-moderate { background: radial-gradient(circle, #ffeb3b 0%, transparent 70%); }
+        .aqi-unhealthy-sensitive { background: radial-gradient(circle, #ff9800 0%, transparent 70%); }
+        .aqi-unhealthy { background: radial-gradient(circle, #f44336 0%, transparent 70%); }
+
+        /* Monitoring Nodes */
+        .monitoring-node {
+            position: absolute;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            border: 3px solid #fff;
+            z-index: 100;
+            animation: nodeGlow 2s ease-in-out infinite;
+        }
+
+        @keyframes nodeGlow {
+            0%, 100% { box-shadow: 0 2px 8px rgba(0,0,0,0.3), 0 0 20px rgba(255,255,255,0.5); }
+            50% { box-shadow: 0 2px 8px rgba(0,0,0,0.3), 0 0 30px rgba(255,255,255,0.8); }
+        }
+
+        .monitoring-node:hover {
+            transform: scale(1.3);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        }
+
+        .node-good { background: #00e676; }
+        .node-moderate { background: #ffeb3b; }
+        .node-unhealthy-sensitive { background: #ff9800; }
+        .node-unhealthy { background: #f44336; }
+
+        /* Header */
+        .header {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(10px);
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            z-index: 200;
+        }
+
+        .title {
+            font-size: 26px;
+            font-weight: 700;
+            color: #2e7d32;
+            margin-bottom: 5px;
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: #666;
+        }
+
+        /* Legend */
+        .legend {
+            position: absolute;
+            top: 100px;
+            right: 20px;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(10px);
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            z-index: 200;
+        }
+
+        .legend h3 {
+            margin-bottom: 15px;
+            font-size: 16px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin-right: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        /* Info Box */
+        .info-box {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(10px);
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            max-width: 350px;
+            z-index: 200;
+        }
+
+        .info-box h4 {
+            margin-bottom: 10px;
+            color: #2e7d32;
+        }
+
+        .info-box p {
+            font-size: 13px;
+            line-height: 1.6;
+            color: #555;
+        }
+
+        /* Popup */
+        .popup {
+            position: fixed;
+            background: rgba(255,255,255,0.98);
+            backdrop-filter: blur(20px);
+            border-radius: 16px;
+            padding: 25px;
+            min-width: 350px;
+            max-width: 400px;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            border: 1px solid rgba(0,0,0,0.1);
+            display: none;
+            z-index: 1000;
+            animation: popupIn 0.3s ease;
+        }
+
+        @keyframes popupIn {
+            from {
+                opacity: 0;
+                transform: scale(0.8) translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+        }
+
+        .popup-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .popup-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            color: #999;
+            font-size: 24px;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .close-btn:hover {
+            color: #333;
+        }
+
+        .aqi-value {
+            font-size: 48px;
+            font-weight: 700;
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        .sensor-readings {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .sensor-item {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid #e9ecef;
+        }
+
+        .sensor-label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .sensor-value {
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .chart-container {
+            margin: 20px 0;
+            height: 150px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 10px;
+            position: relative;
+            overflow: hidden;
+            border: 1px solid #e9ecef;
+        }
+
+        .chart {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        .forecast {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .forecast-title {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .forecast-value {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        /* Street Labels */
+        .street-label {
+            position: absolute;
+            font-size: 11px;
+            color: #666;
+            background: rgba(255,255,255,0.8);
+            padding: 2px 6px;
+            border-radius: 3px;
+            white-space: nowrap;
+            z-index: 50;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="city-map">
+            <div class="map-base"></div>
+            
+            <!-- River -->
+            <div class="river" style="width: 80px; height: 100%; left: 15%; transform: rotate(-5deg);"></div>
+            
+            <!-- Major Streets -->
+            <div class="street major-street" style="height: 8px; width: 100%; top: 25%;"></div>
+            <div class="street major-street" style="height: 8px; width: 100%; top: 50%;"></div>
+            <div class="street major-street" style="height: 8px; width: 100%; top: 75%;"></div>
+            <div class="street major-street" style="width: 8px; height: 100%; left: 35%;"></div>
+            <div class="street major-street" style="width: 8px; height: 100%; left: 60%;"></div>
+            <div class="street major-street" style="width: 8px; height: 100%; left: 80%;"></div>
+            
+            <!-- Minor Streets -->
+            <div class="street minor-street" style="height: 4px; width: 100%; top: 15%;"></div>
+            <div class="street minor-street" style="height: 4px; width: 100%; top: 35%;"></div>
+            <div class="street minor-street" style="height: 4px; width: 100%; top: 40%;"></div>
+            <div class="street minor-street" style="height: 4px; width: 100%; top: 60%;"></div>
+            <div class="street minor-street" style="height: 4px; width: 100%; top: 85%;"></div>
+            <div class="street minor-street" style="width: 4px; height: 100%; left: 25%;"></div>
+            <div class="street minor-street" style="width: 4px; height: 100%; left: 45%;"></div>
+            <div class="street minor-street" style="width: 4px; height: 100%; left: 70%;"></div>
+            <div class="street minor-street" style="width: 4px; height: 100%; left: 90%;"></div>
+            
+            <!-- City Blocks -->
+            <div class="city-block" style="top: 5%; left: 37%; width: 20%; height: 18%;"></div>
+            <div class="city-block" style="top: 5%; left: 62%; width: 16%; height: 18%;"></div>
+            <div class="city-block" style="top: 27%; left: 37%; width: 20%; height: 20%;"></div>
+            <div class="city-block" style="top: 27%; left: 62%; width: 16%; height: 20%;"></div>
+            <div class="city-block" style="top: 52%; left: 5%; width: 18%; height: 20%;"></div>
+            <div class="city-block" style="top: 52%; left: 37%; width: 20%; height: 20%;"></div>
+            <div class="city-block" style="top: 52%; left: 62%; width: 16%; height: 20%;"></div>
+            <div class="city-block" style="top: 77%; left: 37%; width: 20%; height: 15%;"></div>
+            <div class="city-block" style="top: 77%; left: 62%; width: 25%; height: 15%;"></div>
+            
+            <!-- Parks -->
+            <div class="city-block park-area" style="top: 5%; left: 5%; width: 8%; height: 18%;"></div>
+            <div class="city-block park-area" style="top: 77%; left: 5%; width: 18%; height: 15%;"></div>
+            <div class="city-block park-area" style="top: 27%; left: 82%; width: 15%; height: 20%;"></div>
+            
+            <!-- Street Labels -->
+            <div class="street-label" style="top: 23%; left: 40%;">Main Avenue</div>
+            <div class="street-label" style="top: 48%; left: 65%;">Central Street</div>
+            <div class="street-label" style="top: 73%; left: 40%;">Industrial Road</div>
+            <div class="street-label" style="top: 30%; left: 33%; transform: rotate(-90deg);">Park Lane</div>
+            <div class="street-label" style="top: 50%; left: 58%; transform: rotate(-90deg);">Market St</div>
+            <div class="street-label" style="top: 40%; left: 13%; transform: rotate(-80deg);">Riverside Dr</div>
+            
+            <!-- AQI Overlays -->
+            <div class="aqi-overlay aqi-good" style="width: 300px; height: 300px; top: 5%; left: 0%;"></div>
+            <div class="aqi-overlay aqi-moderate" style="width: 350px; height: 350px; top: 20%; left: 35%;"></div>
+            <div class="aqi-overlay aqi-unhealthy-sensitive" style="width: 320px; height: 320px; top: 50%; left: 5%;"></div>
+            <div class="aqi-overlay aqi-unhealthy" style="width: 380px; height: 380px; top: 15%; left: 55%;"></div>
+            <div class="aqi-overlay aqi-good" style="width: 280px; height: 280px; top: 60%; left: 65%;"></div>
+            
+            <!-- Monitoring Nodes -->
+            <div class="monitoring-node node-good" data-station="Riverside Park" data-aqi="42" style="top: 15%; left: 10%;"></div>
+            <div class="monitoring-node node-moderate" data-station="Downtown Center" data-aqi="78" style="top: 35%; left: 48%;"></div>
+            <div class="monitoring-node node-unhealthy-sensitive" data-station="Industrial District" data-aqi="125" style="top: 65%; left: 25%;"></div>
+            <div class="monitoring-node node-unhealthy" data-station="East Commercial" data-aqi="165" style="top: 30%; left: 70%;"></div>
+            <div class="monitoring-node node-good" data-station="South Park" data-aqi="38" style="top: 80%; left: 75%;"></div>
+            <div class="monitoring-node node-moderate" data-station="City Hall" data-aqi="92" style="top: 45%; left: 50%;"></div>
+            <div class="monitoring-node node-good" data-station="North Residential" data-aqi="48" style="top: 10%; left: 45%;"></div>
+            <div class="monitoring-node node-unhealthy-sensitive" data-station="Market Square" data-aqi="108" style="top: 55%; left: 40%;"></div>
+        </div>
+        
+        <div class="header">
+            <h1 class="title">Green Internet of Things (IoT): A Pathway to Sustainable Smart Cities</h1>
+            <p class="subtitle">Real-time Air Quality Index (AQI) Monitoring System - Live City View</p>
+        </div>
+        
+        <div class="legend">
+            <h3>Air Quality Index</h3>
+            <div class="legend-item">
+                <div class="legend-color node-good"></div>
+                <span>Good (0-50)</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color node-moderate"></div>
+                <span>Moderate (51-100)</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color node-unhealthy-sensitive"></div>
+                <span>Unhealthy for Sensitive (101-150)</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color node-unhealthy"></div>
+                <span>Unhealthy (151-200)</span>
+            </div>
+        </div>
+        
+        <div class="info-box">
+            <h4>How This System Works</h4>
+            <p>This real-time visualization displays air quality data from IoT sensors deployed across the city. The map shows actual street layouts with colored overlays indicating AQI levels - green for clean air, red for polluted areas. Each sensor node continuously monitors PM2.5, PM10, O₃, and NO₂ levels. Click any node to view detailed readings and trends.</p>
+        </div>
+        
+        <div class="popup" id="popup">
+            <div class="popup-header">
+                <h2 class="popup-title" id="stationName"></h2>
+                <button class="close-btn" onclick="closePopup()">&times;</button>
+            </div>
+            <div class="aqi-value" id="aqiValue"></div>
+            
+            <div class="sensor-readings">
+                <div class="sensor-item">
+                    <div class="sensor-label">PM2.5</div>
+                    <div class="sensor-value" id="pm25">--</div>
+                </div>
+                <div class="sensor-item">
+                    <div class="sensor-label">PM10</div>
+                    <div class="sensor-value" id="pm10">--</div>
+                </div>
+                <div class="sensor-item">
+                    <div class="sensor-label">O₃</div>
+                    <div class="sensor-value" id="o3">--</div>
+                </div>
+                <div class="sensor-item">
+                    <div class="sensor-label">NO₂</div>
+                    <div class="sensor-value" id="no2">--</div>
+                </div>
+            </div>
+            
+            <div class="chart-container">
+                <canvas id="chart" class="chart"></canvas>
+            </div>
+            
+            <div class="forecast">
+                <div class="forecast-title">24-Hour Forecast</div>
+                <div class="forecast-value" id="forecastValue">--</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const nodes = document.querySelectorAll('.monitoring-node');
+        const popup = document.getElementById('popup');
+        const canvas = document.getElementById('chart');
+        const ctx = canvas.getContext('2d');
+        
+        // Generate random sensor data
+        function generateSensorData(aqi) {
+            return {
+                pm25: (aqi * 0.8 + Math.random() * 20).toFixed(1) + ' μg/m³',
+                pm10: (aqi * 1.2 + Math.random() * 30).toFixed(1) + ' μg/m³',
+                o3: (aqi * 0.5 + Math.random() * 15).toFixed(1) + ' ppb',
+                no2: (aqi * 0.6 + Math.random() * 10).toFixed(1) + ' ppb'
+            };
+        }
+        
+        // Generate historical data for chart
+        function generateHistoricalData(currentAqi) {
+            const data = [];
+            for (let i = 24; i >= 0; i--) {
+                const variation = (Math.random() - 0.5) * 20;
+                data.push(Math.max(0, currentAqi + variation));
+            }
+            return data;
+        }
+        
+        // Draw chart
+        function drawChart(data) {
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = '#2e7d32';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            
+            const max = Math.max(...data);
+            const min = Math.min(...data);
+            const range = max - min || 1;
+            
+            data.forEach((value, index) => {
+                const x = (index / (data.length - 1)) * canvas.width;
+                const y = canvas.height - ((value - min) / range) * canvas.height * 0.8 - 10;
+                
+                if (index === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+            
+            ctx.stroke();
+            
+            // Add gradient fill
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, 'rgba(46, 125, 50, 0.2)');
+            gradient.addColorStop(1, 'rgba(46, 125, 50, 0)');
+            
+            ctx.lineTo(canvas.width, canvas.height);
+            ctx.lineTo(0, canvas.height);
+            ctx.closePath();
+            ctx.fillStyle = gradient;
+            ctx.fill();
+        }
+        
+        // Get AQI color
+        function getAqiColor(aqi) {
+            if (aqi <= 50) return '#00e676';
+            if (aqi <= 100) return '#ffeb3b';
+            if (aqi <= 150) return '#ff9800';
+            return '#f44336';
+        }
+        
+        // Get AQI status
+        function getAqiStatus(aqi) {
+            if (aqi <= 50) return 'Good';
+            if (aqi <= 100) return 'Moderate';
+            if (aqi <= 150) return 'Unhealthy for Sensitive Groups';
+            return 'Unhealthy';
+        }
+        
+        // Node click handler
+        nodes.forEach(node => {
+            node.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const station = e.target.dataset.station;
+                const aqi = parseInt(e.target.dataset.aqi);
+                const sensorData = generateSensorData(aqi);
+                const historicalData = generateHistoricalData(aqi);
+                
+                // Update popup content
+                document.getElementById('stationName').textContent = station;
+                document.getElementById('aqiValue').textContent = aqi;
+                document.getElementById('aqiValue').style.color = getAqiColor(aqi);
+                
+                document.getElementById('pm25').textContent = sensorData.pm25;
+                document.getElementById('pm10').textContent = sensorData.pm10;
+                document.getElementById('o3').textContent = sensorData.o3;
+                document.getElementById('no2').textContent = sensorData.no2;
+                
+                // Update forecast
+                const forecastAqi = Math.round(aqi + (Math.random() - 0.5) * 30);
+                document.getElementById('forecastValue').textContent = 
+                    `Expected AQI: ${forecastAqi} - ${getAqiStatus(forecastAqi)}`;
+                document.getElementById('forecastValue').style.color = getAqiColor(forecastAqi);
+                
+                // Show popup first to get its dimensions
+                popup.style.display = 'block';
+                
+                // Get dimensions
+                const rect = e.target.getBoundingClientRect();
+                const popupWidth = popup.offsetWidth;
+                const popupHeight = popup.offsetHeight;
+                const windowWidth = window.innerWidth;
+                const windowHeight = window.innerHeight;
+                const margin = 20;
+                
+                // Calculate optimal position
+                let left = rect.left + rect.width / 2 - popupWidth / 2;
+                let top = rect.bottom + 10;
+                
+                // Horizontal bounds check
+                if (left < margin) {
+                    left = margin;
+                } else if (left + popupWidth > windowWidth - margin) {
+                    left = windowWidth - popupWidth - margin;
+                }
+                
+                // Vertical bounds check
+                if (top + popupHeight > windowHeight - margin) {
+                    // Try positioning above the node
+                    top = rect.top - popupHeight - 10;
+                    
+                    // If still doesn't fit, position at center of viewport
+                    if (top < margin) {
+                        top = Math.max(margin, (windowHeight - popupHeight) / 2);
+                    }
+                }
+                
+                // Apply calculated position
+                popup.style.left = left + 'px';
+                popup.style.top = top + 'px';
+                
+                // Draw chart
+                setTimeout(() => drawChart(historicalData), 100);
+            });
+        });
+        
+        // Close popup
+        function closePopup() {
+            popup.style.display = 'none';
+        }
+        
+        // Close popup when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.classList.contains('monitoring-node') && !popup.contains(e.target)) {
+                closePopup();
+            }
+        });
+        
+        // Animate nodes on load
+        setTimeout(() => {
+            nodes.forEach((node, index) => {
+                setTimeout(() => {
+                    node.style.transform = 'scale(1.2)';
+                    setTimeout(() => {
+                        node.style.transform = 'scale(1)';
+                    }, 200);
+                }, index * 100);
+            });
+        }, 500);
+    </script>
+</body>
+</html>
